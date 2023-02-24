@@ -21,4 +21,5 @@ fn main() {
         .unwrap();
 
     assert_eq!(command.executable, "cargo");
+    assert_eq!(command.env.len(), 0);
 }
