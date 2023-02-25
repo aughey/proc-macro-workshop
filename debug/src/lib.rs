@@ -2,6 +2,7 @@ use helper::DeriveInputWrapper;
 use proc_macro::TokenStream;
 use quote::quote;
 
+
 fn do_work(input: syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream>
 {
     let input = DeriveInputWrapper::new(input);
@@ -12,11 +13,18 @@ fn do_work(input: syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream>
         .and_then(|s| s.named_fields())
         .ok_or_else(|| syn::Error::new_spanned(name, "Only structs with named fields are supported"))?;
 
-    let field_write = fields.named.iter()
+    let field_write = fields.iter()
         .map(|f| {
-            let name = &f.ident;
+            let name = f.ident().unwrap();
+
+            let value = if let Some(debugstr) = f.attribute_as_string("debug") {
+                quote! { &format_args!(#debugstr, &self.#name) }
+            } else {
+                quote! { &self.#name }
+            };
+
             quote! {
-                .field(stringify!(#name), &self.#name)
+                .field(stringify!(#name), #value)
             }
         });
 
@@ -34,7 +42,7 @@ fn do_work(input: syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream>
     Ok(impl_debug)
 }
 
-#[proc_macro_derive(CustomDebug)]
+#[proc_macro_derive(CustomDebug, attributes(debug))]
 pub fn derive(input: TokenStream) -> TokenStream {
 
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
