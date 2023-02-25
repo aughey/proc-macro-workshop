@@ -48,7 +48,7 @@ impl<'a> BuilderField<'a> {
             let (name, ty) = self.nt();
             quote!(
                 pub fn #lit(&mut self, #lit : #setty) -> &mut Self {
-                    self.#name.push(#lit);
+                    self.#name.get_or_insert_with(Vec::new).push(arg);
                     self
                 }
             )
@@ -72,8 +72,9 @@ impl<'a> BuilderField<'a> {
         #name: self.#name.clone()
       )
     } else {
+        let err_message_lit = syn::LitStr::new(&format!("required field {} is not set", name), name.span());
       quote!(
-        #name: self.#name.clone().ok_or("required field is not set")?
+        #name: self.#name.clone().ok_or(#err_message_lit)?
       )
     }
   }
@@ -98,22 +99,40 @@ fn field_to_builder_field<'a>(field: &'a syn::Field) -> Option<BuilderField<'a>>
 
         let inner_type = get_inner_type_from_pathargs(args)?;
 
-        Some(BuilderField {
+        BuilderField {
                 name: name,
                 ty: inner_type,
                 optional:true,
                 one_at_a_time: get_each_arg_from_field(field, &inner_type)
-            })
+            }
     } else {
-        Some(BuilderField {
+        BuilderField {
             name: name,
             ty: ty,
             optional:false,
             one_at_a_time: get_each_arg_from_field(field, &ty)
-        })
+        }
     };
 
-    bf
+    // XXX need to clean up this
+    let bf = if let Some(oaat) = &bf.one_at_a_time {
+        let myname = bf.name;
+        let oaatname = &oaat.0;
+
+        if myname == oaatname {
+            // Clear out the one at a time
+            BuilderField {
+                one_at_a_time: None,
+                ..bf
+            }
+        } else {
+            bf
+        }
+    } else {
+        bf
+    };
+
+    Some(bf)
 }
 
 fn get_inner_type(ty: &syn::Type) -> Option<&syn::Type> {
@@ -408,7 +427,7 @@ mod tests {
         let expected = r#"
             pub fn build(& mut self) -> Result<Test, Box<dyn std::error::Error>> {
                 Ok(Test {
-                    required: self.required.clone().ok_or("required field is not set")? ,
+                    required: self.required.clone().ok_or("required field required is not set")? ,
                     optional: self.optional.clone()
                 })
             }
@@ -472,7 +491,7 @@ mod tests {
                 self
             }
             pub fn arg(&mut self, arg: String) -> &mut Self {
-                self.args.push(arg);
+                self.args.get_or_insert_with(Vec::new).push(arg);
                 self
             }
         "#;
