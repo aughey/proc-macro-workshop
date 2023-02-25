@@ -5,7 +5,14 @@ use quote::quote;
 
 fn do_work(input: syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream>
 {
-    let input = DeriveInputWrapper::new(input);
+    let mut input = DeriveInputWrapper::new(input);
+
+    input.add_trait_bounds(syn::parse_quote!(std::fmt::Debug));
+
+    // eschew our mutability
+    let input = input;
+
+    let (impl_generics, ty_generics, where_clause) = input.generics().split_for_impl();
 
     let name = input.name();
 
@@ -30,7 +37,7 @@ fn do_work(input: syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream>
 
  
     let impl_debug = quote! {
-        impl std::fmt::Debug for #name {
+        impl #impl_generics std::fmt::Debug for #name #ty_generics #where_clause {
             fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 f.debug_struct(stringify!(#name))
                 #(#field_write)*

@@ -73,6 +73,20 @@ impl DeriveInputWrapper {
         Self { input }
     }
 
+    pub fn add_trait_bounds(&mut self, bounds: syn::TypeParamBound) {
+        for param in &mut self.input.generics.type_params_mut() {
+            param.bounds.push(bounds.clone());
+        }
+    }
+
+    pub fn generics(&self) -> &syn::Generics {
+        &self.input.generics
+    }
+
+    pub fn generics_mut(&mut self) -> &mut syn::Generics {
+        &mut self.input.generics
+    }
+
     pub fn name<'a>(&'a self) -> &'a Ident {
         &self.input.ident
     }
@@ -87,11 +101,5 @@ impl DeriveInputWrapper {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+   
 }
