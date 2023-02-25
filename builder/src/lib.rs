@@ -3,9 +3,10 @@
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote, ToTokens};
-use syn::{parse_macro_input, DeriveInput};
+use syn::{parse_macro_input, DeriveInput, spanned::Spanned };
 
 struct BuilderField<'a> {
+    field: &'a syn::Field,
     name: &'a syn::Ident,
     ty: &'a syn::Type,
     optional: bool,
@@ -31,7 +32,7 @@ impl<'a> BuilderField<'a> {
     fn storage(&self) -> proc_macro2::TokenStream {
         let (name, ty) = self.nt();
             quote!(
-                #name: Option<#ty>
+                #name: std::option::Option<#ty>
             )
     }
 
@@ -40,7 +41,7 @@ impl<'a> BuilderField<'a> {
         
         let set_statement = 
             quote!(
-                self.#name = Some(#name);
+                self.#name = std::option::Option::Some(#name);
             );
         
         let each_setter = if let Some(lit) = &self.one_at_a_time {
@@ -100,6 +101,7 @@ fn field_to_builder_field<'a>(field: &'a syn::Field) -> Option<BuilderField<'a>>
         let inner_type = get_inner_type_from_pathargs(args)?;
 
         BuilderField {
+            field,
                 name: name,
                 ty: inner_type,
                 optional:true,
@@ -107,6 +109,7 @@ fn field_to_builder_field<'a>(field: &'a syn::Field) -> Option<BuilderField<'a>>
             }
     } else {
         BuilderField {
+            field,
             name: name,
             ty: ty,
             optional:false,
@@ -164,7 +167,56 @@ fn get_inner_type_from_pathargs(args: &syn::PathArguments) -> Option<&syn::Type>
     Some(inner_type)
 }
 
-fn get_each_arg_from_field<'a>(field: &'a syn::Field, ty : &syn::Type) -> Option<(syn::Ident,syn::Type)> {
+fn get_attrib_pairs_for_attribute(attr: syn::Attribute) -> Vec<AttribPair> {
+
+    let builder_meta = attr.parse_meta();
+    let builder_meta = if let Ok(bm) = builder_meta {
+        bm
+    } else {
+        return vec![];
+    };
+    let meta_list = if let syn::Meta::List(ml) = builder_meta {
+        ml
+    } else {
+        return vec![];
+    };
+
+    let nested = &meta_list.nested;
+    let nested_name_values = nested.iter().map(|n| {
+        if let syn::NestedMeta::Meta(syn::Meta::NameValue(nv)) = n {
+            Some(nv)
+        } else {
+            None
+        }
+    }).filter(|nv| nv.is_some()).map(|nv| nv.unwrap());
+
+    let ret = nested_name_values.map(|nv| Some(
+        AttribPair {
+            span: meta_list.span(),
+            name: nv.path.get_ident()?.clone(),
+            value: nv.lit.clone()
+        }
+        ))
+        .filter(|v| v.is_some()).map(|v| v.unwrap());
+    let ret = ret.collect::<Vec<_>>();
+    ret
+}
+
+struct AttribPair {
+    name: syn::Ident,
+    #[allow(dead_code)]
+    value: syn::Lit,
+    span: proc_macro2::Span
+}
+
+fn get_attrib_pairs_for_field(myident: &str, field: &syn::Field) -> Vec<AttribPair> {
+    let attrs = &field.attrs;
+    let builder_attrs = attrs.iter().filter(|a| a.path.is_ident(myident));
+
+    builder_attrs.map(|a| get_attrib_pairs_for_attribute(a.clone())).flatten().collect::<Vec<_>>()
+}
+
+fn get_each_arg_from_field<'a>(field: &'a syn::Field, ty : &syn::Type) -> Option<(syn::Ident,syn::Type)> {   
     let attrs = &field.attrs;
     let builder_attrs = attrs.iter().filter(|a| a.path.is_ident("builder"));
 
@@ -255,13 +307,27 @@ fn make_buidler_build_fn(original_ident: &proc_macro2::Ident, fields: &[BuilderF
     let init_fields = fields.iter().map(|f| f.init()).collect::<Vec<_>>();
 
     let out = quote! {
-        pub fn build(&mut self) -> Result<#original_ident, Box<dyn std::error::Error>> {
-            Ok(#original_ident {
+        pub fn build(&mut self) -> std::result::Result<#original_ident, std::boxed::Box<dyn std::error::Error>> {
+            std::result::Result::Ok(#original_ident {
                 #(#init_fields),*
             })
         }
     };
     out
+}
+
+fn check_valid_attrs(fields: &[BuilderField]) -> syn::Result<()> {
+    let valid_attributes = &["each"];
+    for field in fields {
+        let attribs = get_attrib_pairs_for_field("builder", field.field);
+        for attrib in attribs {
+            let name = attrib.name.to_string();
+            if !valid_attributes.contains(&name.as_str()) {
+                return Err(syn::Error::new(attrib.span, format!("expected `builder(each = \"...\")`")));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[proc_macro_derive(Builder, attributes(builder))]
@@ -276,6 +342,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
     };
 
     let fields = settable_fields_from_struct_data(&struct_data);
+
+    // compile error check the field internal builder attributes
+    // Valid attributes
+    {
+        let valid = check_valid_attrs(&fields);
+        if let Err(e) = valid {
+            return e.to_compile_error().into();
+        }
+    }
 
     let ident = &deriveinput.ident;
     let builder_name = format_ident!("{}Builder", ident);
@@ -381,8 +456,8 @@ mod tests {
         let expected = r#"
             #[derive(Default)]
             pub struct TestBuilder {
-                required: Option<String> ,
-                optional: Option<String>
+                required: std::option::Option<String> ,
+                optional: std::option::Option<String>
             }
         "#;
 
@@ -401,12 +476,12 @@ mod tests {
         let expected = r#"
             impl TestBuilder {
                 pub fn required(&mut self, required: String) -> &mut Self {
-                    self.required = Some(required);
+                    self.required = std::option::Option::Some(required);
                     self
                 }
 
                 pub fn optional(&mut self, optional: String) -> &mut Self {
-                    self.optional = Some(optional);
+                    self.optional = std::option::Option::Some(optional);
                     self
                 }
             }
@@ -425,8 +500,8 @@ mod tests {
         let build_fn = make_buidler_build_fn(&original_name, &builder_fields);
 
         let expected = r#"
-            pub fn build(& mut self) -> Result<Test, Box<dyn std::error::Error>> {
-                Ok(Test {
+            pub fn build(& mut self) -> std::result::Result<Test, std::boxed::Box<dyn std::error::Error>> {
+                std::result::Result::Ok(Test {
                     required: self.required.clone().ok_or("required field required is not set")? ,
                     optional: self.optional.clone()
                 })
@@ -487,7 +562,7 @@ mod tests {
 
         let expected = r#"
             pub fn args(&mut self, args: Vec<String>) -> &mut Self {
-                self.args = Some(args);
+                self.args = std::option::Option::Some(args);
                 self
             }
             pub fn arg(&mut self, arg: String) -> &mut Self {
@@ -497,5 +572,28 @@ mod tests {
         "#;
         let expected = syn::parse_str::<proc_macro2::TokenStream>(expected).unwrap();
         assert_eq!(field_setter.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn test_get_attrib_pairs_for_field() {
+        let test_struct_str = r#"
+        pub struct Command {
+            #[builder(each = "arg")]
+            args: Vec<String>,
+        }
+        "#;
+
+        let s = test_struct_from_string(test_struct_str);
+        let fields = match &s.fields {
+            syn::Fields::Named(f) => f,
+            _ => panic!("This should be a named struct"),
+        };
+
+        let first_field = fields.named.first().unwrap();
+        let attrib_pairs = get_attrib_pairs_for_field("builder", first_field);
+
+        assert_eq!(attrib_pairs.len(), 1);
+        let attrib_pair = attrib_pairs.first().unwrap();
+        assert_eq!(attrib_pair.name, "each");
     }
 }
