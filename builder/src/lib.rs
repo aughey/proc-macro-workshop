@@ -1,6 +1,3 @@
-// ignore unused variables
-#![allow(unused_variables)]
-
 use proc_macro::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use syn::{parse_macro_input, DeriveInput, spanned::Spanned };
@@ -46,7 +43,7 @@ impl<'a> BuilderField<'a> {
         
         let each_setter = if let Some(lit) = &self.one_at_a_time {
             let (lit,setty) = lit;
-            let (name, ty) = self.nt();
+            let (name, _) = self.nt();
             quote!(
                 pub fn #lit(&mut self, #lit : #setty) -> &mut Self {
                     self.#name.get_or_insert_with(Vec::new).push(arg);
@@ -67,7 +64,7 @@ impl<'a> BuilderField<'a> {
     }
 
   fn init(&self) -> proc_macro2::TokenStream {
-    let (name, ty) = self.nt();
+    let (name, _) = self.nt();
     if self.optional {
       quote!(
         #name: self.#name.clone()
@@ -533,7 +530,7 @@ mod tests {
         let attr = field_attrs.first().unwrap();
         assert!(attr.path.is_ident("builder"));
         let meta = attr.parse_meta().unwrap();
-        let meta_list = match meta {
+        let _meta_list = match meta {
             syn::Meta::List(l) => l,
             _ => panic!("This should be a list"),
         };
