@@ -9,6 +9,7 @@ struct BuilderField<'a> {
     name: &'a syn::Ident,
     ty: &'a syn::Type,
     optional: bool,
+    one_at_a_time: Option<(syn::Ident,syn::Type)>,
 }
 
 impl<'a> BuilderField<'a> {
@@ -29,28 +30,30 @@ impl<'a> BuilderField<'a> {
     }
     fn storage(&self) -> proc_macro2::TokenStream {
         let (name, ty) = self.nt();
-        if self.optional {
             quote!(
                 #name: Option<#ty>
             )
-        } else {
-            quote!(
-                #name: Option<#ty>
-            )
-        }
     }
 
     fn setter(&self) -> proc_macro2::TokenStream {
         let (name, ty) = self.nt();
         
-        let set_statement = if self.optional {
+        let set_statement = 
             quote!(
                 self.#name = Some(#name);
+            );
+        
+        let each_setter = if let Some(lit) = &self.one_at_a_time {
+            let (lit,setty) = lit;
+            let (name, ty) = self.nt();
+            quote!(
+                pub fn #lit(&mut self, #lit : #setty) -> &mut Self {
+                    self.#name.push(#lit);
+                    self
+                }
             )
         } else {
-            quote!(
-                self.#name = Some(#name);
-            )
+            quote!()
         };
 
         quote!(
@@ -58,6 +61,7 @@ impl<'a> BuilderField<'a> {
                 #set_statement
                 self
             }
+            #each_setter
         )
     }
 
@@ -88,34 +92,95 @@ fn field_to_builder_field<'a>(field: &'a syn::Field) -> Option<BuilderField<'a>>
     let first_segment = type_as_path.path.segments.first()?;
     let is_option = first_segment.ident == "Option";
 
-    if is_option {
+    let bf = if is_option {
         // Pull out what's inside the angle brackets of the option
         let args = &first_segment.arguments;
-        let angle_bracketed = if let syn::PathArguments::AngleBracketed(angle_bracketed) = args {
-            angle_bracketed
-        } else {
-            return None;
-        };
 
-        let first_arg = angle_bracketed.args.first()?;
-        let inner_type = if let syn::GenericArgument::Type(inner_type) = first_arg {
-            inner_type
-        } else {
-            return None;
-        };
+        let inner_type = get_inner_type_from_pathargs(args)?;
 
         Some(BuilderField {
                 name: name,
                 ty: inner_type,
-                optional:true
+                optional:true,
+                one_at_a_time: get_each_arg_from_field(field, &inner_type)
             })
     } else {
         Some(BuilderField {
             name: name,
             ty: ty,
-            optional:false
+            optional:false,
+            one_at_a_time: get_each_arg_from_field(field, &ty)
         })
-    }
+    };
+
+    bf
+}
+
+fn get_inner_type(ty: &syn::Type) -> Option<&syn::Type> {
+    let type_as_path = if let syn::Type::Path(type_as_path) = ty {
+        Some(type_as_path)
+    } else {
+        None
+    }?;
+
+    let first_segment = type_as_path.path.segments.first()?;
+
+    get_inner_type_from_pathargs(&first_segment.arguments)
+}
+
+fn get_inner_type_from_pathargs(args: &syn::PathArguments) -> Option<&syn::Type> {  
+    let inner_type = if let syn::PathArguments::AngleBracketed(inner_type) = args {
+        Some(inner_type)
+    } else {
+        None
+    }?;
+
+    let inner_type = inner_type.args.first()?;
+    let inner_type = if let syn::GenericArgument::Type(inner_type) = inner_type {
+        Some(inner_type)
+    } else {
+        None
+    }?;
+
+    Some(inner_type)
+}
+
+fn get_each_arg_from_field<'a>(field: &'a syn::Field, ty : &syn::Type) -> Option<(syn::Ident,syn::Type)> {
+    let attrs = &field.attrs;
+    let builder_attrs = attrs.iter().filter(|a| a.path.is_ident("builder"));
+
+    let first_builder_attr = *builder_attrs.collect::<Vec<_>>().get(0)?;
+
+    let builder_meta = first_builder_attr.parse_meta().ok()?;
+    let meta_list = if let syn::Meta::List(ml) = builder_meta {
+        ml
+    } else {
+        return None;
+    };
+
+    let nested = &meta_list.nested;
+    let nested_name_values = nested.iter().map(|n| {
+        if let syn::NestedMeta::Meta(syn::Meta::NameValue(nv)) = n {
+            Some(nv)
+        } else {
+            None
+        }
+    }).filter(|nv| nv.is_some()).map(|nv| nv.unwrap());
+
+    let each_name_value = nested_name_values.filter(|nv| nv.path.is_ident("each")).map(|nv| nv.lit.clone());
+
+    let lit = each_name_value.take(1).collect::<Vec<_>>().get(0)?.clone();
+
+    let lit = if let syn::Lit::Str(lit) = lit {
+        lit
+    } else {
+        return None;
+    };
+
+    let inner_type = get_inner_type(ty)?;
+
+
+    Some((format_ident!("{}", lit.value()), inner_type.clone()))
 }
 
 fn settable_fields(fields: &syn::FieldsNamed) -> Vec<BuilderField> {
@@ -180,7 +245,7 @@ fn make_buidler_build_fn(original_ident: &proc_macro2::Ident, fields: &[BuilderF
     out
 }
 
-#[proc_macro_derive(Builder)]
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let _ = input;
 
@@ -229,14 +294,7 @@ mod tests {
  
     use super::*;
 
-    fn test_struct() -> syn::ItemStruct {
-        let test_struct_str = r#"
-            struct Test {
-                required: String,
-                optional: Option<String>,
-            }
-        "#;
-
+    fn test_struct_from_string(test_struct_str: &str) -> syn::ItemStruct {
         let parsed_str: syn::Item = syn::parse_str(test_struct_str).unwrap();
 
         let s = if let syn::Item::Struct(s) = parsed_str {
@@ -246,6 +304,24 @@ mod tests {
         };
 
         s   
+    }
+
+
+    fn test_struct() -> syn::ItemStruct {
+        let test_struct_str = r#"
+            struct Test {
+                required: String,
+                optional: Option<String>,
+            }
+        "#;
+        test_struct_from_string(test_struct_str)
+    }
+
+    fn buidler_fields_from_item_struct<'a>(s: &'a syn::ItemStruct) -> Vec<BuilderField<'a>> {
+        match &s.fields {
+            syn::Fields::Named(f) => settable_fields(&f),
+            _ => vec![]
+        }
     }
 
     fn test_fields() -> syn::FieldsNamed {
@@ -340,5 +416,67 @@ mod tests {
 
         let expected = syn::parse_str::<proc_macro2::TokenStream>(expected).unwrap();
         assert_eq!(build_fn.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn test_field_attr_behavior() {
+        let test_struct_str = r#"
+        pub struct Command {
+            #[builder(each = "arg")]
+            args: Vec<String>,
+        }
+        "#;
+
+        let s = test_struct_from_string(test_struct_str);
+        let fields = match &s.fields {
+            syn::Fields::Named(f) => f,
+            _ => panic!("This should be a named struct"),
+        };
+
+        let first_field = fields.named.first().unwrap();
+        let field_attrs = &first_field.attrs;
+        assert_eq!(field_attrs.len(), 1);
+        let attr = field_attrs.first().unwrap();
+        assert!(attr.path.is_ident("builder"));
+        let meta = attr.parse_meta().unwrap();
+        let meta_list = match meta {
+            syn::Meta::List(l) => l,
+            _ => panic!("This should be a list"),
+        };
+
+    }
+
+    #[test]
+    fn test_one_at_a_time_builder() {
+        let test_struct_str = r#"
+        pub struct Command {
+            #[builder(each = "arg")]
+            args: Vec<String>,
+        }
+        "#;
+
+        let s = test_struct_from_string(test_struct_str);
+        let builder_fields = buidler_fields_from_item_struct(&s);
+
+        assert_eq!(builder_fields.len(), 1);
+
+        let first_field = builder_fields.first().unwrap();
+
+        assert!(first_field.one_at_a_time.is_some());
+
+        let field_setter = first_field.setter();
+
+        let expected = r#"
+            pub fn args(&mut self, args: Vec<String>) -> &mut Self {
+                self.args = Some(args);
+                self
+            }
+            pub fn arg(&mut self, arg: String) -> &mut Self {
+                self.args.push(arg);
+                self
+            }
+        "#;
+        let expected = syn::parse_str::<proc_macro2::TokenStream>(expected).unwrap();
+        assert_eq!(field_setter.to_string(), expected.to_string());
     }
 }
