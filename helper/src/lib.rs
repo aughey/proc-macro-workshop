@@ -113,6 +113,13 @@ impl<'a> FieldWrapper<'a> {
         ret
     }
 
+    pub fn type_path(&self) -> Option<&syn::TypePath> {
+        if let syn::Type::Path(p) = self.ty() {
+            return Some(p);
+        }
+        None
+    }
+
     pub fn phantom_data_type(&self) -> Option<syn::Type> {
         if let syn::Type::Path(p) = self.ty() {
             if let Some(segment) = p.path.segments.first() {

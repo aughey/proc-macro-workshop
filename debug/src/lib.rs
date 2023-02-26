@@ -42,6 +42,28 @@ fn do_work(input: syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream>
     }
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
+    // Look for associated fields
+    let genericparams = generics.type_params().map(|p| p.ident.clone()).collect::<Vec<_>>();
+    eprintln!("genericparams: {:?}", genericparams);
+
+    let _extra_where = fields.iter().filter_map(|f| {
+        if let syn::Type::Path(p) = f.ty() {
+            let segments = &p.path.segments;
+            let mut i = segments.iter();
+            let first = i.next()?;
+            eprintln!("segments: {:?}", &first.ident);
+            if genericparams.contains(&first.ident) && i.next().is_some() {
+                return Some(quote! {
+                    #segments : std::fmt::Debug
+                })
+            }
+        }
+       
+        None
+    }).collect::<Vec<_>>();
+
+   
+
     let field_write = fields.iter()
         .map(|f| {
             let name = f.ident().unwrap();
