@@ -113,6 +113,29 @@ impl<'a> FieldWrapper<'a> {
         ret
     }
 
+    pub fn phantom_data_type(&self) -> Option<syn::Type> {
+        if let syn::Type::Path(p) = self.ty() {
+            if let Some(segment) = p.path.segments.first() {
+                if segment.ident == "PhantomData" {
+                    // We found a PhantomData field
+                    // pull out path arguments from this path
+                        if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                            // We found angle bracketed arguments
+                            // pull out the first one
+                            if let Some(arg) = args.args.first() {
+                                if let syn::GenericArgument::Type(ty) = arg {
+                                    // We found a type argument
+                                    // return it
+                                    return Some(ty.clone());
+                                }
+                            }
+                        }
+                    }
+            }
+        }
+        None
+    }
+
     pub fn attribute_as_string(&self, key: &str) -> Option<syn::Lit> {
         let kvs = self.metas().filter_map(|m| m.key_value());
         for kv in kvs {
@@ -144,9 +167,9 @@ impl DeriveInputWrapper {
         Self { input }
     }
 
-    pub fn add_trait_bounds(&mut self, bounds: syn::TypeParamBound, except: &Vec<syn::Type>) {
-        for param in &mut self.input.generics.type_params_mut() {
-            if except.contains(&param) {
+    pub fn add_trait_bounds(&mut self, bounds: syn::TypeParamBound, except: &Vec<syn::Ident>) {
+        for param in self.input.generics.type_params_mut() {
+            if except.contains(&param.ident) {
                 continue;
             }
             param.bounds.push(bounds.clone());
@@ -227,5 +250,38 @@ mod tests {
         let likefn = first_attr.like_fn();
 
         assert!(likefn.is_some());
+    }
+
+    #[test]
+    fn test_phantom_data_type() {
+        let test_struct_str = r#"
+        pub struct Field<T> {
+            marker: PhantomData<T>,
+            string: S,
+            #[debug = "0b{:08b}"]
+            bitmask: u8,
+        }
+        "#;
+
+        let test_struct = test_struct_from_string(test_struct_str);
+
+        let fields = test_struct.fields.iter().map(|f| FieldWrapper { field: &f }).collect::<Vec<_>>();
+
+        assert_eq!(fields.len(), 3);
+
+        let f = fields.last().unwrap();
+        let phantom_data_type = f.phantom_data_type();
+        assert!(phantom_data_type.is_none());
+
+        let f = fields.first().unwrap();
+        let phantom_data_type = f.phantom_data_type();
+        assert!(phantom_data_type.is_some());
+
+        let t = phantom_data_type.unwrap();
+        if let syn::Type::Path(p) = t {
+            assert_eq!(p.path.segments.first().unwrap().ident, "T");
+        } else {
+            panic!("This should be a path");
+        }
     }
 }
