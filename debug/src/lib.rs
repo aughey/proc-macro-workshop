@@ -31,6 +31,23 @@ fn do_work(input: syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream>
     }).collect::<Vec<_>>();
 
     let generics = input.generics();
+   
+
+    // Look for associated fields
+    let genericparams = generics.type_params().map(|p| p.ident.clone()).collect::<Vec<_>>();
+
+    let extra_where = fields.iter().flat_map(|f| {
+        let associated_types = f.associated_types(&genericparams);
+
+        // Turn all of these paths that now match the pattern
+        // into a where clause
+        associated_types.into_iter().map(|p| {
+            quote! {
+                #p : std::fmt::Debug
+            }
+        }).collect::<Vec<_>>()
+    }).collect::<Vec<_>>();
+
     let mut generics = generics.clone();
 
     let bounds : syn::TypeParamBound = syn::parse_quote!(std::fmt::Debug);
@@ -38,31 +55,33 @@ fn do_work(input: syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream>
         if phantom_data_types.contains(&param.ident) {
             continue;
         }
+        let is_trait = param.bounds.iter().find(|b| {
+            if let syn::TypeParamBound::Trait(_) = b {
+                true
+            } else {
+                false
+            }
+        });
+        if is_trait.is_some() {
+            continue
+        }
         param.bounds.push(bounds.clone());
     }
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
-    // Look for associated fields
-    let genericparams = generics.type_params().map(|p| p.ident.clone()).collect::<Vec<_>>();
-    eprintln!("genericparams: {:?}", genericparams);
 
-    let _extra_where = fields.iter().filter_map(|f| {
-        if let syn::Type::Path(p) = f.ty() {
-            let segments = &p.path.segments;
-            let mut i = segments.iter();
-            let first = i.next()?;
-            eprintln!("segments: {:?}", &first.ident);
-            if genericparams.contains(&first.ident) && i.next().is_some() {
-                return Some(quote! {
-                    #segments : std::fmt::Debug
-                })
-            }
+    // Update where_clause with our additions
+    let where_clause = if let Some(wc) = where_clause {
+        quote! {
+            #wc
+            #(#extra_where),*
         }
-       
-        None
-    }).collect::<Vec<_>>();
-
-   
+    } else {
+        quote! {
+            where
+            #(#extra_where),*
+        }
+    };
 
     let field_write = fields.iter()
         .map(|f| {
@@ -89,6 +108,7 @@ fn do_work(input: syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream>
             }
         }
     };
+
 
     Ok(impl_debug)
 }

@@ -1,5 +1,26 @@
 use syn::{DeriveInput, Data::Struct, Ident, NestedMeta};
 
+pub struct SynPathCollector<'a> {
+    pub paths: Vec<&'a syn::Path>
+}
+
+impl<'a> syn::visit::Visit<'a> for SynPathCollector<'a> {
+    fn visit_path(&mut self, i: &'a syn::Path) {
+        self.paths.push(i);
+        for segment in &i.segments {
+            syn::visit::visit_path_segment(self, segment);
+        }
+    }
+}
+
+impl<'a> SynPathCollector<'a> {
+    pub fn visit(ty: &'a syn::Type) -> Vec<&'a syn::Path> {
+        let mut collector = SynPathCollector { paths: Vec::new() };
+        syn::visit::visit_type(&mut collector, ty);
+        collector.paths
+    }
+}
+
 pub struct DeriveInputWrapper {
     input: DeriveInput
 }
@@ -113,6 +134,23 @@ impl<'a> FieldWrapper<'a> {
         ret
     }
 
+    pub fn associated_types(&'a self, generics : &Vec<Ident>) -> Vec<&'a syn::Path> {
+         // Get all the path segements in this type
+         let paths = SynPathCollector::visit(self.ty());
+         // Find paths that match the pattern
+         let paths = paths.into_iter().filter_map(|p| {
+             // We're looking for segments that have a generic
+             // parameter followed by anything else
+             let mut i = p.segments.iter();
+             let first = i.next()?;
+             if generics.contains(&first.ident) && i.next().is_some() {
+                 return Some(p);
+             }
+             None
+         });
+         paths.collect::<Vec<_>>()
+    }
+
     pub fn type_path(&self) -> Option<&syn::TypePath> {
         if let syn::Type::Path(p) = self.ty() {
             return Some(p);
@@ -205,6 +243,8 @@ impl DeriveInputWrapper {
 
 #[cfg(test)]
 mod tests {
+    use quote::format_ident;
+
     use super::*;
 
     fn test_struct_from_string(test_struct_str: &str) -> syn::ItemStruct {
@@ -290,5 +330,68 @@ mod tests {
         } else {
             panic!("This should be a path");
         }
+    }
+
+    #[test]
+    fn test_associated_types() {
+        let test_struct_str = r#"
+        pub struct Field<T> {
+            marker: Asdf<T::Value>
+        }
+        "#;
+
+        let test_struct = test_struct_from_string(test_struct_str);
+
+        let fields = test_struct.fields.iter().map(|f| FieldWrapper { field: &f }).collect::<Vec<_>>();
+
+        assert_eq!(fields.len(), 1);
+
+        let f = fields.first().unwrap();
+
+        let generics = vec![format_ident!("T")];
+
+        let associated_types = f.associated_types(&generics);
+
+        assert_eq!(associated_types.len(), 1);
+
+        let t = associated_types.first().unwrap();
+
+        assert_eq!(t.segments.len(), 2);
+
+        let segments = t.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(segments, vec!["T".to_string(), "Value".to_string()]);
+    }
+
+    #[test]
+    fn test_trait_behaviour() {
+        let test_struct_str = r#"
+        pub struct Field<T: Trait> {
+            values: Vec<T::Value>,
+        }
+        "#;
+
+        let test_struct = test_struct_from_string(test_struct_str);
+
+        let params = test_struct.generics.type_params().collect::<Vec<_>>();
+
+        assert_eq!(params.len(), 1);
+
+        let first_param = params.first().unwrap();
+
+        let ident = first_param.ident.to_string();
+
+        assert_eq!(ident, "T");
+
+        let has_trait_bound = first_param.bounds.iter().find(|b| {
+            if let syn::TypeParamBound::Trait(_) = b {
+                true
+            } else {
+                false
+            }
+        });
+
+        assert!(has_trait_bound.is_some());
+     
     }
 }
